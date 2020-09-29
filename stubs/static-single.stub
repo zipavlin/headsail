@@ -1,0 +1,21 @@
+<?php
+
+namespace Zipavlin\Headsail\Utilities;
+
+use Zipavlin\Headsail\Property;
+use Zipavlin\Headsail\Utilities\Abstracts\StaticUtility;
+
+class {{title}} extends StaticUtility
+{
+    public static $name = "{{name}}";
+    public static $group = "{{group}}";
+    public static $position = {{position}};
+    public static $default_values = [
+{{list}}
+    ];
+
+    public static function evaluate(string $value): ?Property
+    {
+        return $value === '{{list_single}}' ? new Property(static::class, $value) : null;
+    }
+}

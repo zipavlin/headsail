@@ -1,0 +1,18 @@
+<?php
+
+namespace Zipavlin\Headsail\Utilities;
+
+use Zipavlin\Headsail\Utilities\Abstracts\DynamicUtility;
+
+class {{title}} extends DynamicUtility
+{
+    public static $name = "{{name}}";
+    public static $group = "{{group}}";
+    public static $position = {{position}};
+    public static $property = "{{property}}";
+    public static $expandable = {{expandable}};
+    public static $pattern = "{{pattern}}";
+    public static $default_values = [
+{{default_values}}
+    ];
+}

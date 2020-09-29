@@ -1,0 +1,49 @@
+{
+    "name": "zipavlin/headsail",
+    "description": "A Tailwindcss interpreter, parser and composer",
+    "keywords": [
+        "zipavlin",
+        "headwind"
+    ],
+    "homepage": "https://github.com/zipavlin/headsail",
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "Žiga Pavlin",
+            "email": "ziga.pavle@gmail.com",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^7.1",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "fabpot/goutte": "^4.0",
+        "mnapoli/silly": "^1.7",
+        "phpunit/phpunit": "^7.0",
+        "symfony/process": "^5.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "Zipavlin\\Headsail\\": "src"
+        },
+        "files": [
+            "src/constants.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Zipavlin\\Headsail\\Tests\\": "tests"
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/phpunit",
+        "test-coverage": "vendor/bin/phpunit --coverage-html coverage"
+
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

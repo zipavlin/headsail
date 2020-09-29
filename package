@@ -1,0 +1,575 @@
+#!/usr/bin/env php
+<?php
+$autoloader = require file_exists(__DIR__.'/vendor/autoload.php') ?  __DIR__.'/vendor/autoload.php' : __DIR__.'/../../autoload.php';
+
+use Goutte\Client;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Question\ChoiceQuestion;
+use Symfony\Component\DomCrawler\Crawler;
+use Zipavlin\Headsail\Utilities\Abstracts\DynamicUtility;
+use const Zipavlin\Headsail\Constants\{
+    UTILITIES
+};
+
+date_default_timezone_set('UTC');
+
+function run($message) {
+    return "<fg=white;bg=blue;options=bold> EXEC </> <options=bold>$message</>";
+}
+function error($message) {
+    return "<fg=white;bg=red;options=bold> FAIL </> $message";
+}
+function success($message) {
+    return "<fg=white;bg=green;options=bold> DONE </> $message";
+}
+function info($message) {
+    return "<fg=white;bg=yellow;options=bold> INFO </> $message";
+}
+function getNegativeToken($array)
+{
+    return (count(preg_grep("/^[^\-]([\w\-\/:]+)$/", $array)) !== count($array)) ? "\-" : null;
+}
+function getPropertyToken($array)
+{
+    if (!is_array($array) || count($array) <= 1) {
+        return null;
+    }
+    // sort desc based on strlen
+    usort($array, static function ($a, $b) {
+        return strlen($b) - strlen($a);
+    });
+    // split str to array
+    $array = array_map('str_split', $array);
+    // get longest string
+    $candidate = array_shift($array);
+    // get all characters that are on same index
+    $common = array_intersect_assoc($candidate, ...$array);
+    if (!$common || !count($common)) {
+        return null;
+    }
+    // use only chars that follow natural order, breaking on index skip
+    $natural_index = 0;
+    $res = '';
+    foreach ($common as $index => $char) {
+        if ($index === $natural_index) {
+            $res .= $char;
+            $natural_index++;
+        } else {
+            break;
+        }
+    }
+    // return str or null
+    return !empty($res) ? $res : null;
+}
+function getVariantToken($array, $prefix = '(?:[a-zA-Z-]+?)-?')
+{
+    $candidates = [
+        'x',
+        'y',
+        't',
+        'r',
+        'b',
+        'l',
+        'tr',
+        'tl',
+        'bt',
+        'bl',
+        'rt',
+        'rb',
+        'lt',
+        'lb',
+        'start',
+        'end',
+        'span',
+    ];
+    // sort candidates
+    usort($candidates, function ($a,$b){
+        return strlen($b) - strlen($a);
+    });
+    // normalize prefix
+    $prefix = strpos($prefix, '|') !== false ? "(?:$prefix)-?" : $prefix;
+    // build pattern
+    $pattern = "/^{$prefix}(".implode('|', $candidates).")-(?:.*)$/";
+    // find only relevant options
+    $array = preg_replace($pattern, "$1", preg_grep($pattern, $array));
+    // find only used variants
+    $array = array_unique($array);
+    // sort based on lengt
+    usort($array, function ($a,$b){
+        return strlen($b) - strlen($a);
+    });
+    return count($array) ? implode('|', $array) : null;
+}
+function isRegexAllInclusive($pattern, $array) {
+    return count(preg_grep("/{$pattern}/", $array)) === count($array);
+}
+function getClassContent($data, $stub) {
+    return preg_replace_callback("/{{(?<name>[a-zA-Z_]+)}}/", static function ($matches) use ($data) {
+        return $data[$matches['name']] ?? $matches[0];
+    }, file_get_contents(realpath("./stubs/$stub.stub")));
+}
+function getExpendables($variants = null): string {
+    if (!$variants) {
+        return 'false';
+    }
+    $variants = explode('|', $variants);
+
+    $candidates = [
+        ['t', 'r', 'b', 'l'],
+        ['tl', 'tr', 'br', 'bl'],
+        ['x', 'l', 'r'],
+        ['y', 't', 'b'],
+        ['r', 'tr', 'br'],
+        ['l', 'tl', 'bl'],
+        ['t', 'tl', 'tr'],
+        ['b', 'bl', 'br']
+    ];
+    $match = [];
+    foreach ($candidates as $candidate) {
+        if (count(array_intersect($variants, $candidate)) === count($candidate)) {
+            $match[] = $candidate;
+        }
+    }
+
+    if (count($match)) {
+        $match = array_reduce($match, static function (array $acc, array $candidate) {
+            if (is_array($candidate) && count($candidate) === 4) {
+                array_unshift($candidate, 'null');
+            }
+            $origin = $candidate[0];
+            $target = array_splice($candidate, 1);
+            $acc[] =
+                "'$origin' => [" .
+                implode(", ", array_map(static function (string $variant) {
+                    return "'$variant'";
+                }, $target)) .
+                "]";
+            return $acc;
+        }, []);
+
+        return "[".implode(", ", $match)."]";
+    }
+
+    return 'false';
+}
+function normalizeOptions($options): array {
+    return array_map(static function ($option) {
+        return preg_replace("/^'?\.?([\w\-\/:]+)(?: .*)?'?$/", "$1", ltrim($option, '='));
+    }, $options);
+}
+function getDefaultValues($pattern, $options): string {
+    $values = array_filter(preg_replace_callback("/$pattern/", static function ($matches) {
+        return $matches['value'] ?? null;
+    }, $options), static function ($item) {
+        return !empty($item);
+    });
+    $values = array_unique($values);
+    return implode("\n", preg_replace("/^(.*)$/", "\t\t'$1',", $values));
+}
+function getNamespace() {
+    return array_keys((array) (((array) json_decode(file_get_contents("./composer.json"))->autoload)['psr-4']))[0];
+}
+
+$app = new Silly\Application();
+
+/**
+ * Add url
+ */
+$app->command(
+    'add:url url [-g|--group=] [-t|--title=] [--position=] [--force]',
+    function ($url, $group, $title, $position, $force, OutputInterface $output) {
+    $client = new Client();
+    $crawler = $client->request('GET', $url);
+    $output->writeln(run("extracting data from $url"));
+
+    // get title and group if not set
+    if (!$title || $group) {
+        $title = preg_replace("/^(.*) - Tailwind CSS/", "$1", $crawler->filter('head title')->first()->text());
+        $group = null;
+        $crawler->filter('#nav a span.relative')->each(function (Crawler $node) use ($title, &$group) {
+            if (!$group && $node->text() === $title) {
+                $group = $node->parents()->filter('h5')->first()->text();
+            }
+        });
+    }
+    $output->writeln(info("extracted group: $group"));
+    $output->writeln(info("extracted title: $title"));
+
+    // try to get if utility is dynamic
+    $is_dynamic = false;
+    $has_negative_values = false;
+    if ($crawler->filter('#customizing')->count()) {
+        $is_customizable = true;
+
+        // try to get if utility has dynamic values
+        // dynamic values are set in two way:
+        // either by customizing theme: {<utilityName>: {}}
+        // or customizing theme: {extend: {<utilityName>: {}}
+        $is_dynamic = in_array(
+            'theme',
+            array_unique(
+                array_merge(...$crawler
+                    ->filter('#content #customizing')
+                    ->nextAll()
+                    ->filter('pre code > span')
+                    ->each(static function (Crawler $node) {
+                        return array_filter(
+                            array_map(
+                                static function ($c) {
+                                    return trim(preg_replace("/([:{}=+\-\/,]|\.\.\.)/", "", $c));
+                                },
+                                explode(" ", $node->text())
+                            ),
+                            static function ($c) {
+                                return !empty($c);
+                            });
+                })
+            )
+        ), true);
+
+        // utility can have negative values if title with
+        // id negative-values exists
+        $has_negative_values = (bool) $crawler->filter('#content h3#negative-values')->count();
+    }
+
+    // send feedback
+    $output->writeln(info("extracted type: ".($is_dynamic ? 'dynamic' : 'static')));
+    $output->writeln(info("extracted values: ".($has_negative_values ? 'positive and negative' : 'positive only')));
+
+    // get class table
+    $class_list = $crawler
+            ->filter('#content table tbody tr')
+            ->each(static function (Crawler $node) {
+                return trim($node->filter('td')->first()->text());
+            });
+    // remove items that are not classes
+    $class_list = array_filter($class_list, static function ($class) {
+        return $class[0] === '.';
+    });
+    if (!count($class_list)) {
+        $output->writeln(error("No classes found -> aborting"));
+        return;
+    }
+    $class_list = implode(' ', array_map(static function ($class) {
+        return "-o=\"$class\"";
+    }, $class_list));
+
+    // call next command
+    $position = (int) ($position ?? 999);
+    if ($is_dynamic) {
+        $this->runCommand("add:dynamic \"$title\" --group=\"$group\" --position=\"$position\" $class_list".($has_negative_values ? ' --negative' : '').($force ? ' --force' : ''), $output);
+    } else {
+        $this->runCommand("add:static \"$title\" --group=\"$group\" --position=\"$position\" $class_list".($force ? ' --force' : ''), $output);
+    }
+}
+)->descriptions('Create utility definition from docs url', [
+    'url' => 'Tailwindcss docs url',
+    '--group' => 'Group name',
+    '--title' => 'Utility title',
+    '--force' => 'Force rewrite',
+    '--position' => 'Position of utility',
+]);
+
+/**
+ * Add static utility
+ */
+$app->command(
+    'add:static title [-g|--group=] [--o|options=]* [--force] [--position=]',
+    function ($title, $group, $options, $force, $position, OutputInterface $output) {
+        $name = preg_replace("/\s+/", "-", preg_replace("/[^a-zA-Z]/", " ", $title));
+        $title = str_replace("-", "", $name);
+        $dir = "./src/Utilities/$title.php";
+        if (!$force && file_exists($dir)) {
+            $output->writeln(info("utility file $dir already exist"));
+        } else {
+            $output->writeln(run("adding new static utility $title"));
+
+            // early return
+            if (!count($options)) {
+                $output->writeln(error("cannot write static utility without options"));
+                return;
+            }
+            // normalize options
+            $options = normalizeOptions($options);
+            $output->writeln(run("writing utility file to $dir"));
+            file_put_contents($dir, getClassContent([
+                'title' => $title,
+                'name' => strtolower($name),
+                'group' => strtolower($group),
+                'position' => (int) ($position ?? 999),
+                'list' => implode("\n", preg_replace("/([\w-]+)/", "\t\t'$1',", $options)),
+                'list_single' => $options[0]
+            ], count($options) === 1 ? 'static-single' : 'static-multiple'));
+        }
+    }
+)->descriptions('Create static utility definition', [
+    'title'   => 'Utility title that is used for classname and name',
+    '--group' => 'Group name',
+    '--options' => 'List of class examples',
+    '--force' => 'Force rewrite',
+    '--position' => 'Position of utility',
+]);
+
+/**
+ * Add dynamic utility
+ */
+$app->command(
+    'add:dynamic title [-g|--group=] [--o|options=]* [--force] [--position=] [-p|--pattern=] [--negative]',
+    function ($title, $group, $options, $force, $position, $pattern, $negative, OutputInterface $output) {
+        $name = preg_replace("/\s+/", "-", preg_replace("/[^a-zA-Z]/", " ", $title));
+        $title = str_replace("-", "", $name);
+        $dir = "./src/Utilities/$title.php";
+        if (!$force && file_exists($dir)) {
+            $output->writeln(info("utility file $dir already exist"));
+        } else {
+            $output->writeln(run("adding new dynamic utility $title"));
+
+            // try to create pattern
+            if (!$pattern) {
+                // TODO: we should test if options exists and open prompt if not
+                // normalize options
+                $options = normalizeOptions($options);
+                $output->writeln(run("extracting pattern from " . count($options) . " example options"));
+                $pattern = "";
+                if ($negative || getNegativeToken($options)) {
+                    $pattern .= "(?<negative>\-)?";
+                    // remove token form array
+                    $options = preg_replace("/^(?:-)?([\w\-\/:]+)$/", "$1", $options);
+                }
+                // try to get property token
+                if ($property_token = getPropertyToken($options)) {
+                    if (substr($property_token, -1) === "-") {
+                        $pattern .= "(?:(?<property>" . substr(preg_quote($property_token, null), 0, -2) . ")\-)";
+                    } else {
+                        $pattern .= "(?<property>" . preg_quote($property_token, null) . ")";
+                    }
+                } else {
+                    $property_token = implode('|', array_unique(preg_replace("/^([a-zA-Z]+)(?:-[\w\-\/:]+)?$/", "$1", $options)));
+                    $pattern .= "(?:(?<property>" . $property_token . ")\-)";
+                }
+                $output->writeln(info("extracted property: $property_token"));
+                // try to get variant token
+                if ($variant_token = getVariantToken($options, $property_token ?? null)) {
+                    $pattern .= "(?:(?<variant>{$variant_token})\-)?";
+                    $output->writeln(info("extracted variants: $variant_token"));
+                }
+                // append value token
+                // try to force value
+                if (isRegexAllInclusive("^{$pattern}(?<value>[\w\-\/:]+)$", $options)) {
+                    $pattern .= "(?:\-?(?<=\-)(?<value>[\w\-\/:]+))";
+                } else {
+                    $pattern .= "(?:\-?(?<=\-)(?<value>[\w\-\/:]+))?";
+                }
+                // set start and end
+                $pattern = "^{$pattern}$";
+                $output->writeln(info("extracted pattern: $pattern"));
+            }
+            // test pattern
+            $output->writeln(run("testing pattern on " . count($options) . " example options"));
+            if (!$options || !count($options)) {
+                $output->writeln(info("pattern test: no options to test against -> skipping test"));
+                file_put_contents($dir, getClassContent([
+                    'title' => $title,
+                    'name' => strtolower($name),
+                    'group' => strtolower($group),
+                    'position' => (int) ($position ?? 999),
+                    'property' => '',
+                    'default_values' => '',
+                    'pattern' => "/{$pattern}/",
+                    'expandable' => getExpendables($variant_token ?? null)
+                ], 'dynamic'));
+            } elseif (isRegexAllInclusive($pattern, $options)) {
+                $output->writeln(info("pattern test: passed"));
+                file_put_contents($dir, getClassContent([
+                    'title' => $title,
+                    'name' => strtolower($name),
+                    'group' => strtolower($group),
+                    'position' => (int) ($position ?? 999),
+                    'property' => stripslashes($property_token ?? ''),
+                    'default_values' => getDefaultValues($pattern, $options),
+                    'pattern' => "/{$pattern}/",
+                    'expandable' => getExpendables($variant_token ?? null)
+                ], 'dynamic'));
+            } else {
+                $output->writeln(error("pattern test: failed"));
+            }
+        }
+    }
+)->descriptions('Create dynamic utility definition', [
+    'title'   => 'Utility title that is used for classname and name',
+    '--group' => 'Group name',
+    '--pattern' => 'Pattern used to recognize this utility',
+    '--options' => 'List of class examples',
+    '--force' => 'Force rewrite',
+    '--position' => 'Position of utility',
+    '--negative' => 'Utility has negative values',
+]);
+
+/**
+ * Add all utilities
+ */
+$app->command(
+    'add:all',
+    function (OutputInterface $output) {
+    $output->writeln(run("Rewriting all utilities"));
+    $this->runCommand("add --all", $output);
+}
+)->descriptions('Add/rewrite all utility definitions');
+
+/**
+ * Add new utilities
+ */
+$app->command(
+    'add:new',
+    function (OutputInterface $output) {
+    $output->writeln(run("Adding new utilities"));
+    $this->runCommand("add --new", $output);
+}
+)->descriptions('Add new utility definition(s)');
+
+/**
+ * Generic add command
+ */
+$app->command(
+    'add [-g|--groups] [-u|--utility=] [--force] [--new] [--all]',
+    function (InputInterface $input, OutputInterface $output, $force, $all, $new, $groups) {
+    // fetch all links from navigation
+    $client = new Client();
+    $crawler = $client->request('GET', 'https://tailwindcss.com/');
+    $headers = [];
+    $utilities = [];
+    $crawler->filter('#nav h5')->each(static function (Crawler $header) use (&$utilities, &$headers) {
+        if (!in_array($header->text(), [
+            'Getting started',
+            'Core Concepts',
+            'Customization',
+            'Base Styles',
+        ])) {
+            $headers[] = $header->text();
+            $header->siblings()->each(static function (Crawler $sibling) use (&$utilities, $header) {
+                $sibling->filter('a[href^="/docs"]')->each(static function (Crawler $a, $i) use (&$utilities, $header) {
+                    $utilities[] = [
+                        'group' => $header->text(),
+                        'title' => $a->text(),
+                        'position' => $i,
+                        'url' => 'https://tailwindcss.com' . $a->attr('href')
+                    ];
+                });
+            });
+        }
+    });
+
+    // filter utilities to create
+    if ($all) {
+        $output->writeln(info("selected: all utilities"));
+    } elseif ($new) {
+        $output->writeln(info("selected: new utilities"));
+    } else {
+        $helper = $this->getHelperSet()->get('question');
+        $include_groups = $helper->ask($input, $output, (new ChoiceQuestion(
+            'Which groups of utilities do you want to update? [all]',
+            $headers,
+            implode(",", $headers)
+        ))->setMultiselect(true));
+        $utilities = array_filter($utilities, static function ($utility) use ($include_groups) {
+            return in_array($utility['group'], $include_groups, true);
+        });
+        if(!$groups) {
+            $output->writeln(info("selected groups: ".count($include_groups)));
+            $utility_options = array_map(static function ($utility) {
+                return '[' . $utility['group'] . '] ' . $utility['title'];
+            }, $utilities);
+            $include_utilities = $helper->ask($input, $output, (new ChoiceQuestion(
+                'Which utilities do you want to update? [all]',
+                $utility_options,
+                implode(",", $utility_options)
+            ))->setMultiselect(true));
+            $output->writeln(info("selected: ".count($include_utilities)));
+            $utilities = array_diff_key($utilities, array_flip($include_utilities));
+        } else {
+            $output->writeln(info("selected: ".count($utilities)));
+        }
+    }
+
+    // loop trough utilities and create definitions
+    $force = $force || $all;
+    foreach ($utilities as $utility_array) {
+        $this->runCommand("add:url {$utility_array['url']} --group=\"{$utility_array['group']}\" --title=\"{$utility_array['title']}\" --position=\"{$utility_array['position']}\"".($force ? ' --force' : ''), $output);
+    }
+
+    // update constants
+    $this->runCommand("constants", $output);
+}
+)->descriptions('Add utility definition(s)', [
+    '--groups' => 'Add utilities in selected groups',
+    '--utility' => 'Add only utility on set url',
+    '--force' => 'Force create even when utility definition already exist',
+    '--new' => 'Add new utilities',
+    '--all'   => 'Add all utilities',
+]);
+
+/**
+ * Update utilities constant
+ */
+$app->command(
+    'constants',
+    function (InputInterface $input, OutputInterface $output) {
+        $output->writeln(run("Updating utilities collection"));
+        // get namespace
+        $namespace = getNamespace();
+
+        // load utility definitions
+        $existing = array_map(static function ($class) use ($namespace) {
+            return "{$namespace}Utilities\\{$class}";
+        }, preg_replace("/^(?:\.\/src\/Utilities\/)(?<name>[a-zA-Z]+)\.php$/", "$1", glob("./src/Utilities/*.php")));
+        $output->writeln(info("Existing utilities: " . count($existing)));
+
+        // remove deleted
+        $utilities = array_intersect(UTILITIES, $existing);
+
+        // add missing utilities
+        $utilities = array_merge($utilities, $existing);
+        $utilities = array_unique($utilities);
+
+        // find overlaps
+        $overlaps = array_reduce($utilities, static function ($acc, $utility) {
+            if (get_parent_class($utility) === DynamicUtility::class) {
+                $property = $utility::$property;
+                if (isset($acc[$property])) {
+                    $acc[$property][] = $utility;
+                } else {
+                    $acc[$property] = [$utility];
+                }
+            }
+            return $acc;
+        }, []);
+        $overlaps = array_filter($overlaps, static function ($property) {
+            return count($property) > 1;
+        });
+
+        // create utilities output string
+        $utilities = implode("\n", array_map(static function ($utility) {
+            return "\t\\{$utility}::class,";
+        }, $utilities));
+
+        // create overlaps output string
+        $overlaps = implode("\n", array_map(static function ($utilities, $property) {
+            usort($utilities, function ($a, $b) {
+                return $a::$position - $b::$position;
+            });
+            return "\t'{$property}' => [\n".implode("\n", array_map(static function ($utility) {
+                    return "\t\t\\{$utility}::class,";
+            }, $utilities))."\n\t],";
+        }, $overlaps, array_keys($overlaps)));
+
+        // write file
+        file_put_contents("./src/constants.php", getClassContent([
+            'utilities' => $utilities,
+            'overlaps' => $overlaps
+        ], 'constants'));
+        $output->writeln(success("Utilities collection updated"));
+    }
+)->descriptions('Updates utilities constant');
+
+$app->run();

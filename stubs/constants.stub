@@ -1,0 +1,11 @@
+<?php
+
+namespace Zipavlin\Headsail\Constants;
+
+const UTILITIES = [
+{{utilities}}
+];
+
+const OVERLAPS = [
+{{overlaps}}
+];
