@@ -129,4 +129,12 @@ const OVERLAPS = [
 		\Zipavlin\Headsail\Utilities\DivideWidth::class,
 		\Zipavlin\Headsail\Utilities\DivideColor::class,
 	],
+    'border' => [
+        \Zipavlin\Headsail\Utilities\BorderWidth::class,
+        \Zipavlin\Headsail\Utilities\BorderColor::class
+    ],
+    'border-' => [
+        \Zipavlin\Headsail\Utilities\BorderWidth::class,
+        \Zipavlin\Headsail\Utilities\BorderColor::class
+    ],
 ];

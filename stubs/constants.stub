@@ -8,4 +8,12 @@ const UTILITIES = [
 
 const OVERLAPS = [
 {{overlaps}}
+    'border' => [
+        \Zipavlin\Headsail\Utilities\BorderWidth::class,
+        \Zipavlin\Headsail\Utilities\BorderColor::class
+    ],
+    'border-' => [
+        \Zipavlin\Headsail\Utilities\BorderWidth::class,
+        \Zipavlin\Headsail\Utilities\BorderColor::class
+    ],
 ];
